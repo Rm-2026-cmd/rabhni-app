@@ -1,0 +1,72 @@
+[
+  {
+    "level": 1,
+    "language": "ar",
+    "difficulty": "beginner",
+    "type": "word_to_meaning",
+    "question_text": "ما معنى كلمة 'سَعِيد'؟",
+    "correct_answer": "مسرور وفرحان",
+    "wrong_answers": ["حزين ومكتئب", "غاضب ومستاء", "خائف ومرتعب"],
+    "explanation": "سعيد تعني أن الشخص يشعر بالفرح والسرور والرضا."
+  },
+  {
+    "level": 1,
+    "language": "ar",
+    "difficulty": "beginner",
+    "type": "meaning_to_word",
+    "question_text": "ما الكلمة التي تعني 'يسير على قدميه'؟",
+    "correct_answer": "يَمشي",
+    "wrong_answers": ["يَسبح", "يَطير", "يَجري"],
+    "explanation": "المشي هو الحركة على الأقدام بشكل عادي دون ركض."
+  },
+  {
+    "level": 2,
+    "language": "ar",
+    "difficulty": "easy",
+    "type": "word_to_meaning",
+    "question_text": "ما معنى كلمة 'فَصِيح'؟",
+    "correct_answer": "واضح الكلام ويتحدث بلغة سليمة",
+    "wrong_answers": ["صامت ولا يتكلم", "صاخب وعالي الصوت", "أجش الصوت"],
+    "explanation": "الفصاحة هي وضوح اللفظ وسلامة اللغة."
+  },
+  {
+    "level": 3,
+    "language": "ar",
+    "difficulty": "medium",
+    "type": "context",
+    "question_text": "في جملة: 'أضاء البدر الليلَ' — ما المقصود بالبدر؟",
+    "correct_answer": "القمر في ليلة اكتماله",
+    "wrong_answers": ["النجم الساطع", "الشمس عند الغروب", "الكوكب الزاهر"],
+    "explanation": "البدر هو القمر حين يكون كاملاً مستديراً في الليلة الرابعة عشرة."
+  },
+  {
+    "level": 6,
+    "language": "ar",
+    "difficulty": "pro",
+    "type": "word_to_meaning",
+    "question_text": "ما المعنى الدقيق لكلمة 'مُسْتَوْطِن'؟",
+    "correct_answer": "من يسكن أرضاً ويجعلها وطناً له",
+    "wrong_answers": ["المسافر الدائم", "من لا وطن له", "الحاكم العادل"],
+    "explanation": "الاستيطان هو الإقامة الدائمة في مكان واتخاذه وطناً."
+  },
+  {
+    "level": 1,
+    "language": "en",
+    "difficulty": "beginner",
+    "type": "word_to_meaning",
+    "question_text": "What does 'happy' mean?",
+    "correct_answer": "Feeling joy and pleasure",
+    "wrong_answers": ["Feeling sad and upset", "Feeling angry", "Feeling tired"],
+    "explanation": "Happy describes a state of joy, contentment, and pleasure."
+  },
+  {
+    "level": 1,
+    "language": "tr",
+    "difficulty": "beginner",
+    "type": "word_to_meaning",
+    "question_text": "'Mutlu' kelimesinin anlamı nedir?",
+    "correct_answer": "Sevinç ve neşe hissetmek",
+    "wrong_answers": ["Üzüntü ve keder hissetmek", "Öfke duymak", "Yorgun hissetmek"],
+    "explanation": "Mutlu, sevinç ve memnuniyet durumunu ifade eder."
+  }
+]
