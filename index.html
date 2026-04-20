@@ -1,14 +1,21 @@
 <!DOCTYPE html>
+
 <html lang="ar" dir="rtl">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <meta name="theme-color" content="#0B141A" />
   <title>ربحني معجم</title>
+
+  <!-- Telegram SDK -->
+
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <script src="//libtl.com/sdk.js" data-zone="10883938" data-sdk="show_10883938"></script>
+
+  <!-- Fonts -->
+
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;900&family=Space+Grotesk:wght@400;600;700&display=swap" rel="stylesheet">
+
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
     html, body, #root {
@@ -20,9 +27,46 @@
     }
     #root { display: flex; flex-direction: column; }
   </style>
+
 </head>
+
 <body>
   <div id="root"></div>
+
+  <!-- App -->
+
   <script type="module" src="/src/main.jsx"></script>
+
+  <!-- Ads Logic -->
+
+  <script>
+    function loadAdScript() {
+      if (!document.getElementById("monetag-sdk")) {
+        var s = document.createElement("script");
+        s.id = "monetag-sdk";
+        s.src = "https://libtl.com/sdk.js";
+        s.async = true;
+        s.setAttribute("data-zone", "10883938");
+        s.setAttribute("data-sdk", "show_10883938");
+        document.body.appendChild(s);
+      }
+    }
+
+    function showAd() {
+      if (typeof show_10883938 !== "undefined") {
+        show_10883938();
+      } else {
+        // fallback (لا تنسى تحط رابطك الحقيقي)
+        Telegram.WebApp.openLink("https://omg10.com/4/10899936");
+      }
+    }
+
+    // دالة جاهزة تستدعيها من React
+    window.triggerAd = function () {
+      loadAdScript();
+      setTimeout(showAd, 1000);
+    };
+  </script>
+
 </body>
 </html>

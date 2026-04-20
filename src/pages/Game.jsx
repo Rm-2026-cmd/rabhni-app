@@ -158,18 +158,11 @@ export default function Game({ config, onExit }) {
     } catch (e) { console.error('Submit failed:', e); }
   }
 
-  async function handleRevive() {
-    setAdLoading(true);
-    const result = await ads.showRewarded('revive', session?.session_id);
-    setAdLoading(false);
-    if (result.success) {
-      setLives(3);
-      setPhase('playing');
-      startTimer();
-    } else {
-      alert('الإعلان غير متاح حالياً. حاول لاحقاً.');
-    }
-  }
+  function handleRevive() {
+  setLives(3);
+  setPhase('playing');
+  startTimer();
+}
 
   const q = questions[qIndex];
   const progress = questions.length > 0 ? ((qIndex) / questions.length) * 100 : 0;
@@ -310,25 +303,68 @@ export default function Game({ config, onExit }) {
 }
 
 function GameOver({ score, combo, onRevive, onExit, adLoading }) {
+
+  const handleAdClick = () => {
+    if (window.triggerAd) {
+      window.triggerAd();
+    }
+
+    let rewarded = false;
+
+    const handleFocus = () => {
+      if (rewarded) return;
+      rewarded = true;
+
+      window.removeEventListener("focus", handleFocus);
+
+      onRevive();
+    };
+
+    window.addEventListener("focus", handleFocus);
+
+    // حماية: إذا ما خرج المستخدم أصلاً
+    setTimeout(() => {
+      window.removeEventListener("focus", handleFocus);
+    }, 10000);
+  };
+
   return (
     <div style={{ height:'100%', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:20, padding:24, textAlign:'center' }}>
+      
       <div style={{ fontSize:60 }}>💔</div>
       <div style={{ fontSize:22, fontWeight:900 }}>انتهت حياتك!</div>
-      <div style={{ fontSize:16, color:'var(--text-muted)' }}>النقاط: <span style={{ color:'var(--primary)', fontWeight:700 }}>{score.toLocaleString()}</span></div>
+
+      <div style={{ fontSize:16, color:'var(--text-muted)' }}>
+        النقاط: <span style={{ color:'var(--primary)', fontWeight:700 }}>
+          {score.toLocaleString()}
+        </span>
+      </div>
 
       <div className="card" style={{ width:'100%', padding:20 }}>
+        
         <div style={{ fontSize:14, color:'var(--text-muted)', marginBottom:14 }}>
           🎁 شاهد إعلاناً قصيراً للحصول على فرصة ثانية وإعادة القلوب الثلاثة
         </div>
-        <button className="btn btn-primary" onClick={onRevive} disabled={adLoading} style={{ marginBottom:10 }}>
-          {adLoading ? '⏳ جاري تحميل الإعلان...' : '📺 شاهد إعلاناً — فرصة ثانية'}
+
+        <button
+          className="btn btn-primary"
+          onClick={handleAdClick}
+          disabled={adLoading}
+          style={{ marginBottom:10 }}
+        >
+          📺 شاهد إعلاناً — فرصة ثانية
         </button>
-        <button className="btn btn-secondary" onClick={onExit}>❌ الخروج</button>
+
+        <button className="btn btn-secondary" onClick={onExit}>
+          ❌ الخروج
+        </button>
+
       </div>
 
       <div style={{ fontSize:12, color:'var(--text-muted)', maxWidth:280 }}>
         يمكنك أيضاً الخروج والبدء من جديد في أي وقت — مجاناً تماماً.
       </div>
+
     </div>
   );
 }
