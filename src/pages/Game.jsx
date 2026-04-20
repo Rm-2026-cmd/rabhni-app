@@ -158,10 +158,29 @@ export default function Game({ config, onExit }) {
     } catch (e) { console.error('Submit failed:', e); }
   }
 
-  function handleRevive() {
-  setLives(3);
-  setPhase('playing');
-  startTimer();
+  async function handleRevive() {
+  setAdLoading(true);
+
+  const result = await ads.showRewarded('revive', session?.session_id);
+
+  setAdLoading(false);
+
+  if (result.success) {
+    setLives(3);
+
+    // 🔥 أهم شيء: تصفير حالة السؤال
+    setFeedback(null);
+    setSelectedAnswer(null);
+    setShowExplanation(false);
+
+    // 🔥 الانتقال للسؤال التالي حتى ما يعلق
+    setQIndex(i => i + 1);
+
+    setPhase('playing');
+    startTimer();
+  } else {
+    alert('الإعلان غير متاح حالياً. حاول لاحقاً.');
+  }
 }
 
   const q = questions[qIndex];
@@ -303,31 +322,6 @@ export default function Game({ config, onExit }) {
 }
 
 function GameOver({ score, combo, onRevive, onExit, adLoading }) {
-
-  const handleAdClick = () => {
-    if (window.triggerAd) {
-      window.triggerAd();
-    }
-
-    let rewarded = false;
-
-    const handleFocus = () => {
-      if (rewarded) return;
-      rewarded = true;
-
-      window.removeEventListener("focus", handleFocus);
-
-      onRevive();
-    };
-
-    window.addEventListener("focus", handleFocus);
-
-    // حماية: إذا ما خرج المستخدم أصلاً
-    setTimeout(() => {
-      window.removeEventListener("focus", handleFocus);
-    }, 10000);
-  };
-
   return (
     <div style={{ height:'100%', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:20, padding:24, textAlign:'center' }}>
       
@@ -348,11 +342,11 @@ function GameOver({ score, combo, onRevive, onExit, adLoading }) {
 
         <button
           className="btn btn-primary"
-          onClick={handleAdClick}
+          onClick={onRevive}
           disabled={adLoading}
           style={{ marginBottom:10 }}
         >
-          📺 شاهد إعلاناً — فرصة ثانية
+          {adLoading ? '⏳ جاري تحميل الإعلان...' : '📺 شاهد إعلاناً — فرصة ثانية'}
         </button>
 
         <button className="btn btn-secondary" onClick={onExit}>
