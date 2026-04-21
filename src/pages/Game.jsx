@@ -31,6 +31,22 @@ export default function Game({ config, onExit }) {
 
   const timerRef = useRef(null);
   const questionStart = useRef(Date.now());
+  const retryCountRef = useRef(0);
+  const livesRef = useRef(3);
+  const qIndexRef = useRef(0);
+  const questionsRef = useRef([]);
+  const scoreRef = useRef(0);
+  const answersRef = useRef([]);
+  const sessionRef = useRef(null);
+  const sessionStartRef = useRef(Date.now());
+
+  // Keep refs in sync with state
+  useEffect(() => { livesRef.current = lives; }, [lives]);
+  useEffect(() => { qIndexRef.current = qIndex; }, [qIndex]);
+  useEffect(() => { questionsRef.current = questions; }, [questions]);
+  useEffect(() => { scoreRef.current = score; }, [score]);
+  useEffect(() => { answersRef.current = answers; }, [answers]);
+  useEffect(() => { sessionRef.current = session; }, [session]);
 
   useEffect(() => {
     startSession();
@@ -43,8 +59,10 @@ export default function Game({ config, onExit }) {
         language: config.language,
         deviceFp: getDeviceFingerprint()
       });
+      sessionRef.current = data;
       setSession(data);
       setQuestions(data.questions);
+      questionsRef.current = data.questions;
       setPhase('playing');
       startTimer();
     } catch (e) {
@@ -71,9 +89,58 @@ export default function Game({ config, onExit }) {
 
   function stopTimer() { clearInterval(timerRef.current); }
 
+  // ── FIX: handleTimeout uses refs to avoid stale closure ──
   function handleTimeout() {
     haptic.error();
-    handleWrongAnswer(null);
+    stopTimer();
+
+    const currentLives = livesRef.current;
+    const newLives = currentLives - 1;
+    livesRef.current = newLives;
+    setLives(newLives);
+    setCombo(0);
+    setFeedback('wrong');
+
+    const currentQIndex = qIndexRef.current;
+    const currentQuestions = questionsRef.current;
+
+    // Record timeout as wrong answer
+    answersRef.current = [...answersRef.current, {
+      question_id: currentQuestions[currentQIndex]?.id,
+      selected: null,
+      is_correct: false,
+      response_ms: 15000,
+      combo: 0,
+      score_delta: 0
+    }];
+    setAnswers(answersRef.current);
+
+    if (newLives <= 0) {
+      setTimeout(() => setPhase('gameover'), 1200);
+      return;
+    }
+
+    setTimeout(() => {
+      setFeedback(null);
+      setSelectedAnswer(null);
+      setShowExplanation(false);
+
+      // نفس السؤال مرتين — ثم انتقل للتالي
+      if (retryCountRef.current < 2) {
+        retryCountRef.current += 1;
+        startTimer();
+      } else {
+        retryCountRef.current = 0;
+        const nextIndex = currentQIndex + 1;
+        if (nextIndex >= currentQuestions.length) {
+          finishSession();
+        } else {
+          setQIndex(nextIndex);
+          qIndexRef.current = nextIndex;
+          startTimer();
+        }
+      }
+    }, 1500);
   }
 
   function handleAnswer(answer) {
@@ -81,7 +148,7 @@ export default function Game({ config, onExit }) {
     stopTimer();
 
     const responseMs = Date.now() - questionStart.current;
-    const q = questions[qIndex];
+    const q = questionsRef.current[qIndexRef.current];
     const correct = answer === q.answers.find(a => a.isCorrect)?.text;
 
     setSelectedAnswer(answer);
@@ -90,6 +157,9 @@ export default function Game({ config, onExit }) {
     // Compute score increment
     let points = 0;
     if (correct) {
+      // ── FIX: reset retry counter on correct answer ──
+      retryCountRef.current = 0;
+
       const basePoints = [0,10,15,20,30,50,60,80,100,120,150][config.level] || 10;
       const speedMult = responseMs < 2000 ? 1.5 : responseMs < 5000 ? 1.2 : 1.0;
       const newCombo = combo + 1;
@@ -98,7 +168,10 @@ export default function Game({ config, onExit }) {
 
       setCombo(newCombo);
       setMaxCombo(m => Math.max(m, newCombo));
-      setScore(s => s + points);
+      setScore(s => {
+        scoreRef.current = s + points;
+        return s + points;
+      });
 
       if (newCombo >= 3) {
         setComboFlash(true);
@@ -106,25 +179,34 @@ export default function Game({ config, onExit }) {
       }
       haptic.success();
     } else {
-      const newLives = lives - 1;
+      const newLives = livesRef.current - 1;
+      livesRef.current = newLives;
       setLives(newLives);
       setCombo(0);
-      if (config.level >= 6) setScore(s => Math.max(0, s - Math.round([0,10,15,20,30,50,60,80,100,120,150][config.level]/2)));
+      if (config.level >= 6) {
+        setScore(s => {
+          const newScore = Math.max(0, s - Math.round([0,10,15,20,30,50,60,80,100,120,150][config.level]/2));
+          scoreRef.current = newScore;
+          return newScore;
+        });
+      }
       haptic.error();
     }
 
     // Record answer
-    setAnswers(prev => [...prev, {
+    const newAnswer = {
       question_id: q.id,
       selected: answer,
       is_correct: correct,
       response_ms: responseMs,
       combo: combo + (correct ? 1 : 0),
       score_delta: points
-    }]);
+    };
+    answersRef.current = [...answersRef.current, newAnswer];
+    setAnswers(answersRef.current);
 
     // Check if game over
-    const newLivesVal = correct ? lives : lives - 1;
+    const newLivesVal = correct ? livesRef.current : livesRef.current;
     if (!correct && newLivesVal <= 0) {
       setTimeout(() => setPhase('gameover'), 1200);
       return;
@@ -136,52 +218,47 @@ export default function Game({ config, onExit }) {
       setSelectedAnswer(null);
       setShowExplanation(false);
 
-      if (qIndex + 1 >= questions.length) {
+      const currentQIndex = qIndexRef.current;
+      const currentQuestions = questionsRef.current;
+
+      if (currentQIndex + 1 >= currentQuestions.length) {
         finishSession();
       } else {
-        setQIndex(i => i + 1);
+        const nextIndex = currentQIndex + 1;
+        setQIndex(nextIndex);
+        qIndexRef.current = nextIndex;
         startTimer();
       }
     }, correct ? 800 : 1500);
   }
 
+  // ── FIX: finishSession uses refs for latest values ──
   async function finishSession() {
     stopTimer();
     setPhase('result');
     try {
       await api.put('/game/session', {
-        session_id: session.session_id,
-        answers,
-        claimed_score: score,
-        duration_ms: Date.now() - sessionStart
+        session_id: sessionRef.current?.session_id,
+        answers: answersRef.current,
+        claimed_score: scoreRef.current,
+        duration_ms: Date.now() - sessionStartRef.current
       });
     } catch (e) { console.error('Submit failed:', e); }
   }
 
   async function handleRevive() {
-  setAdLoading(true);
-
-  const result = await ads.showRewarded('revive', session?.session_id);
-
-  setAdLoading(false);
-
-  if (result.success) {
-    setLives(3);
-
-    // 🔥 أهم شيء: تصفير حالة السؤال
-    setFeedback(null);
-    setSelectedAnswer(null);
-    setShowExplanation(false);
-
-    // 🔥 الانتقال للسؤال التالي حتى ما يعلق
-    setQIndex(i => i + 1);
-
-    setPhase('playing');
-    startTimer();
-  } else {
-    alert('الإعلان غير متاح حالياً. حاول لاحقاً.');
+    setAdLoading(true);
+    const result = await ads.showRewarded('revive', session?.session_id);
+    setAdLoading(false);
+    if (result.success) {
+      livesRef.current = 3;
+      setLives(3);
+      setPhase('playing');
+      startTimer();
+    } else {
+      alert('الإعلان غير متاح حالياً. حاول لاحقاً.');
+    }
   }
-}
 
   const q = questions[qIndex];
   const progress = questions.length > 0 ? ((qIndex) / questions.length) * 100 : 0;
@@ -260,7 +337,7 @@ export default function Game({ config, onExit }) {
             </div>
           </div>
 
-          {/* Answers — moving animation for UX */}
+          {/* Answers */}
           <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
             {q.answers.map((ans, idx) => {
               const isSelected = selectedAnswer === ans.text;
@@ -272,6 +349,11 @@ export default function Game({ config, onExit }) {
               if (feedback !== null) {
                 if (isCorrect) { bg='rgba(37,211,102,0.15)'; border='var(--primary)'; color='var(--primary)'; }
                 else if (isSelected && !isCorrect) { bg='rgba(255,92,92,0.15)'; border='var(--danger)'; color='var(--danger)'; }
+              }
+
+              // عند انتهاء الوقت أظهر الإجابة الصحيحة بدون تحديد
+              if (feedback === 'wrong' && !selectedAnswer && isCorrect) {
+                bg='rgba(37,211,102,0.15)'; border='var(--primary)'; color='var(--primary)';
               }
 
               const movingAnim = feedback === null && (idx % 2 === 0 ? 'moveLeft 3s ease infinite' : 'moveRight 3s ease infinite');
@@ -324,41 +406,23 @@ export default function Game({ config, onExit }) {
 function GameOver({ score, combo, onRevive, onExit, adLoading }) {
   return (
     <div style={{ height:'100%', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:20, padding:24, textAlign:'center' }}>
-      
       <div style={{ fontSize:60 }}>💔</div>
       <div style={{ fontSize:22, fontWeight:900 }}>انتهت حياتك!</div>
-
-      <div style={{ fontSize:16, color:'var(--text-muted)' }}>
-        النقاط: <span style={{ color:'var(--primary)', fontWeight:700 }}>
-          {score.toLocaleString()}
-        </span>
-      </div>
+      <div style={{ fontSize:16, color:'var(--text-muted)' }}>النقاط: <span style={{ color:'var(--primary)', fontWeight:700 }}>{score.toLocaleString()}</span></div>
 
       <div className="card" style={{ width:'100%', padding:20 }}>
-        
         <div style={{ fontSize:14, color:'var(--text-muted)', marginBottom:14 }}>
           🎁 شاهد إعلاناً قصيراً للحصول على فرصة ثانية وإعادة القلوب الثلاثة
         </div>
-
-        <button
-          className="btn btn-primary"
-          onClick={onRevive}
-          disabled={adLoading}
-          style={{ marginBottom:10 }}
-        >
+        <button className="btn btn-primary" onClick={onRevive} disabled={adLoading} style={{ marginBottom:10 }}>
           {adLoading ? '⏳ جاري تحميل الإعلان...' : '📺 شاهد إعلاناً — فرصة ثانية'}
         </button>
-
-        <button className="btn btn-secondary" onClick={onExit}>
-          ❌ الخروج
-        </button>
-
+        <button className="btn btn-secondary" onClick={onExit}>❌ الخروج</button>
       </div>
 
       <div style={{ fontSize:12, color:'var(--text-muted)', maxWidth:280 }}>
         يمكنك أيضاً الخروج والبدء من جديد في أي وقت — مجاناً تماماً.
       </div>
-
     </div>
   );
 }
