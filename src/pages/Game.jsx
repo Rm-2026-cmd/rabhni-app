@@ -1,84 +1,87 @@
-// src/pages/Game.jsx — Full production upgrade
-// FIXES: weekly_score (patchScore), accuracy (AccuracyTracker), referral (Telegram SDK), smart questions
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { useApi } from '../hooks/useApi';
-import { useAds } from '../hooks/useAds';
-import { useTelegram } from '../hooks/useTelegram';
-import { useProfile } from '../context/ProfileContext';
-import { enrichSessionQuestions, AccuracyTracker, StreakTracker, calculatePoints, timePressureBonus } from '../engine/questionEngine';
+// src/pages/Game.jsx — Production — كل المشاكل محلولة
+// ✅ weekly_score: patchScore() + syncFromServer()
+// ✅ accuracy:     AccuracyTracker ref — لا stale state
+// ✅ referral:     tg.openTelegramLink
+// ✅ questions:    enrichSessionQuestions — لا تكرار + أنواع متعددة
+// ✅ streak:       StreakTracker + combo flash + time bonus
 
-const QUESTION_TIME = 15;
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { useApi }       from '../hooks/useApi';
+import { useAds }       from '../hooks/useAds';
+import { useTelegram }  from '../hooks/useTelegram';
+import { useProfile }   from '../context/ProfileContext';
+import {
+  enrichSessionQuestions,
+  AccuracyTracker, StreakTracker,
+  calculatePoints, timePressureBonus
+} from '../engine/questionEngine';
+
+const QUESTION_TIME     = 15;
 const INTERSTITIAL_EVERY = 4;
 
 export default function Game({ config, onExit }) {
   const api = useApi();
   const ads = useAds();
   const { haptic, tg, user } = useTelegram();
-  const { patchScore } = useProfile();
+  const { patchScore, syncFromServer, patchAccuracy } = useProfile();
 
-  const [phase, setPhase] = useState('loading');
-  const [session, setSession] = useState(null);
-  const [questions, setQuestions] = useState([]);
-  const [qIndex, setQIndex] = useState(0);
-  const [score, setScore] = useState(0);
-  const [lives, setLives] = useState(3);
-  const [timeLeft, setTimeLeft] = useState(QUESTION_TIME);
-  const [feedback, setFeedback] = useState(null);
-  const [selectedAnswer, setSelectedAnswer] = useState(null);
-  const [showExplanation, setShowExplanation] = useState(false);
-  const [adLoading, setAdLoading] = useState(false);
-  const [comboFlash, setComboFlash] = useState(false);
-  const [timePressureFlash, setTimePressureFlash] = useState(false);
-  const [pointsPopup, setPointsPopup] = useState(null);
-  const [dailyChallenge, setDailyChallenge] = useState(false);
+  // ─── UI state ────────────────────────────────────────────────────────────
+  const [phase, setPhase]             = useState('loading');
+  const [questions, setQuestions]     = useState([]);
+  const [qIndex, setQIndex]           = useState(0);
+  const [score, setScore]             = useState(0);
+  const [lives, setLives]             = useState(3);
+  const [timeLeft, setTimeLeft]       = useState(QUESTION_TIME);
+  const [feedback, setFeedback]       = useState(null);   // 'correct'|'wrong'|null
+  const [selected, setSelected]       = useState(null);
+  const [showExp, setShowExp]         = useState(false);
+  const [adLoading, setAdLoading]     = useState(false);
+  const [comboFlash, setComboFlash]   = useState(false);
+  const [tpFlash, setTpFlash]         = useState(false);  // time-pressure
+  const [popup, setPopup]             = useState(null);   // floating +pts
+  const [isDailyChallenge, setIsDaily] = useState(false);
+  const [displayAcc, setDisplayAcc]   = useState(0);
+  const [displayCombo, setDisplayCombo] = useState(0);
+  const [maxCombo, setMaxCombo]       = useState(0);
 
-  // Tracker instances — mutable, no re-render needed
-  const accuracyRef = useRef(new AccuracyTracker());
-  const streakRef   = useRef(new StreakTracker());
+  // ─── Refs (لتجنب stale closures في callbacks) ────────────────────────────
+  const accRef     = useRef(new AccuracyTracker());
+  const streakRef  = useRef(new StreakTracker());
+  const timerRef   = useRef(null);
+  const qStartRef  = useRef(Date.now());
+  const retryRef   = useRef(0);
+  const livesRef   = useRef(3);
+  const qIdxRef    = useRef(0);
+  const qsRef      = useRef([]);
+  const scoreRef   = useRef(0);
+  const answersRef = useRef([]);
+  const sessionRef = useRef(null);
+  const startedAt  = useRef(Date.now());
 
-  // Derived display values
-  const [displayAccuracy, setDisplayAccuracy] = useState(0);
-  const [displayCombo, setDisplayCombo]       = useState(0);
-  const [displayMaxCombo, setDisplayMaxCombo] = useState(0);
+  // Sync refs with state
+  useEffect(() => { livesRef.current = lives; },    [lives]);
+  useEffect(() => { qIdxRef.current  = qIndex; },   [qIndex]);
+  useEffect(() => { qsRef.current    = questions; }, [questions]);
+  useEffect(() => { scoreRef.current = score; },    [score]);
 
-  // Refs for stale-closure safety
-  const timerRef        = useRef(null);
-  const questionStart   = useRef(Date.now());
-  const retryCountRef   = useRef(0);
-  const livesRef        = useRef(3);
-  const qIndexRef       = useRef(0);
-  const questionsRef    = useRef([]);
-  const scoreRef        = useRef(0);
-  const answersRef      = useRef([]);
-  const sessionRef      = useRef(null);
-  const sessionStartRef = useRef(Date.now());
-
-  useEffect(() => { livesRef.current = lives; }, [lives]);
-  useEffect(() => { qIndexRef.current = qIndex; }, [qIndex]);
-  useEffect(() => { questionsRef.current = questions; }, [questions]);
-  useEffect(() => { scoreRef.current = score; }, [score]);
-  useEffect(() => { sessionRef.current = session; }, [session]);
-
-  useEffect(() => { startSession(); }, []); // eslint-disable-line
-
+  // ─── Init ─────────────────────────────────────────────────────────────────
   useEffect(() => {
-    const last = localStorage.getItem('lastDailyChallenge');
-    if (last !== new Date().toDateString()) setDailyChallenge(true);
-  }, []);
+    const last = localStorage.getItem('lastDaily');
+    if (last !== new Date().toDateString()) setIsDaily(true);
+    startSession();
+  }, []); // eslint-disable-line
 
   async function startSession() {
     try {
       const data = await api.post('/game/session', {
-        level: config.level,
-        language: config.language,
-        deviceFp: getDeviceFingerprint()
+        level: config.level, language: config.language,
+        deviceFp: getDeviceFp()
       });
       const seed = Date.now() + (user?.id || 0);
       const enriched = enrichSessionQuestions(data.questions, seed);
       sessionRef.current = data;
-      setSession(data);
       setQuestions(enriched);
-      questionsRef.current = enriched;
+      qsRef.current = enriched;
       setPhase('playing');
       startTimer();
     } catch (e) {
@@ -87,14 +90,16 @@ export default function Game({ config, onExit }) {
     }
   }
 
+  // ─── Timer ────────────────────────────────────────────────────────────────
   function startTimer() {
-    questionStart.current = Date.now();
+    qStartRef.current = Date.now();
     setTimeLeft(QUESTION_TIME);
+    setTpFlash(false);
     clearInterval(timerRef.current);
     timerRef.current = setInterval(() => {
       setTimeLeft(t => {
         if (t <= 1) { clearInterval(timerRef.current); handleTimeout(); return 0; }
-        if (t === 4) setTimePressureFlash(true);
+        if (t === 5) setTpFlash(true);
         return t - 1;
       });
     }, 1000);
@@ -102,122 +107,157 @@ export default function Game({ config, onExit }) {
 
   function stopTimer() { clearInterval(timerRef.current); }
 
+  // ─── Timeout ──────────────────────────────────────────────────────────────
   const handleTimeout = useCallback(() => {
-    haptic.error();
     stopTimer();
-    accuracyRef.current.record(false);
+    haptic.error();
+    setTpFlash(false);
+    // FIX accuracy — timeout = خطأ
+    accRef.current.record(false);
     streakRef.current.record(false);
-    setDisplayAccuracy(accuracyRef.current.percentage);
+    setDisplayAcc(accRef.current.percentage);
     setDisplayCombo(streakRef.current.current);
-    setTimePressureFlash(false);
-    const newLives = livesRef.current - 1;
-    livesRef.current = newLives;
-    setLives(newLives);
+
+    const nl = livesRef.current - 1;
+    livesRef.current = nl;
+    setLives(nl);
     setFeedback('wrong');
-    const q = questionsRef.current[qIndexRef.current];
-    answersRef.current = [...answersRef.current, {
-      question_id: q?.id, selected: null, is_correct: false, response_ms: 15000, combo: 0, score_delta: 0
-    }];
-    if (newLives <= 0) { setTimeout(() => setPhase('gameover'), 1200); return; }
+
+    const q = qsRef.current[qIdxRef.current];
+    answersRef.current.push({
+      question_id: q?.id, selected: null,
+      is_correct: false, response_ms: 15000, combo: 0, score_delta: 0
+    });
+
+    if (nl <= 0) { setTimeout(() => setPhase('gameover'), 1200); return; }
+
     setTimeout(() => {
-      setFeedback(null); setSelectedAnswer(null); setShowExplanation(false);
-      if (retryCountRef.current < 1) { retryCountRef.current++; startTimer(); }
-      else { retryCountRef.current = 0; advanceQuestion(); }
-    }, 1500);
+      setFeedback(null); setSelected(null); setShowExp(false);
+      if (retryRef.current < 1) { retryRef.current++; startTimer(); }
+      else { retryRef.current = 0; advanceQ(); }
+    }, 1400);
   }, []); // eslint-disable-line
 
-  function advanceQuestion() {
-    const next = qIndexRef.current + 1;
-    if (next >= questionsRef.current.length) { finishSession(); return; }
-    setQIndex(next); qIndexRef.current = next; startTimer();
+  // ─── Advance ──────────────────────────────────────────────────────────────
+  function advanceQ() {
+    const next = qIdxRef.current + 1;
+    if (next >= qsRef.current.length) { finishSession(); return; }
+    setQIndex(next); qIdxRef.current = next; startTimer();
   }
 
-  function handleAnswer(answer) {
+  // ─── Answer ───────────────────────────────────────────────────────────────
+  function handleAnswer(text) {
     if (feedback !== null) return;
     stopTimer();
-    setTimePressureFlash(false);
-    const responseMs = Date.now() - questionStart.current;
-    const q = questionsRef.current[qIndexRef.current];
-    const correct = answer === q.answers.find(a => a.isCorrect)?.text;
+    setTpFlash(false);
+    const ms = Date.now() - qStartRef.current;
+    const q  = qsRef.current[qIdxRef.current];
+    const ok = text === q.answers.find(a => a.isCorrect)?.text;
 
-    setSelectedAnswer(answer);
-    setFeedback(correct ? 'correct' : 'wrong');
+    setSelected(text);
+    setFeedback(ok ? 'correct' : 'wrong');
 
-    // FIX accuracy — record every answer
-    accuracyRef.current.record(correct);
-    streakRef.current.record(correct);
-    setDisplayAccuracy(accuracyRef.current.percentage);
+    // ✅ FIX accuracy — يسجّل كل إجابة
+    accRef.current.record(ok);
+    streakRef.current.record(ok);
+    setDisplayAcc(accRef.current.percentage);
     setDisplayCombo(streakRef.current.current);
-    setDisplayMaxCombo(m => Math.max(m, streakRef.current.max));
+    setMaxCombo(m => Math.max(m, streakRef.current.max));
+    // حفظ الدقة في الـ context
+    patchAccuracy(accRef.current.percentage);
 
-    let points = 0;
-    if (correct) {
-      retryCountRef.current = 0;
-      points = calculatePoints({ level: config.level, responseMs, combo: streakRef.current.current - 1 });
-      points += timePressureBonus(timeLeft, QUESTION_TIME);
-      if (streakRef.current.current >= 3) { setComboFlash(true); setTimeout(() => setComboFlash(false), 600); }
-      setPointsPopup({ value: points });
-      setTimeout(() => setPointsPopup(null), 900);
-      setScore(s => { scoreRef.current = s + points; return s + points; });
+    let pts = 0;
+    if (ok) {
+      retryRef.current = 0;
+      pts = calculatePoints({ level: config.level, responseMs: ms, combo: streakRef.current.current - 1 });
+      pts += timePressureBonus(timeLeft, QUESTION_TIME);
+      if (streakRef.current.current >= 3) {
+        setComboFlash(true);
+        setTimeout(() => setComboFlash(false), 600);
+      }
+      setPopup(pts);
+      setTimeout(() => setPopup(null), 900);
+      setScore(s => { scoreRef.current = s + pts; return s + pts; });
       haptic.success();
     } else {
-      const newLives = livesRef.current - 1;
-      livesRef.current = newLives;
-      setLives(newLives);
+      const nl = livesRef.current - 1;
+      livesRef.current = nl;
+      setLives(nl);
       if (config.level >= 6) {
-        const penalty = calculatePoints({ level: config.level, responseMs: 15000, combo: 0 });
-        setScore(s => { const n = Math.max(0, s - Math.round(penalty * 0.5)); scoreRef.current = n; return n; });
+        // Pro mode: عقوبة على الخطأ
+        const pen = Math.round(calculatePoints({ level: config.level, responseMs: 15000, combo: 0 }) * 0.5);
+        setScore(s => { const n = Math.max(0, s - pen); scoreRef.current = n; return n; });
       }
       haptic.error();
     }
 
-    answersRef.current = [...answersRef.current, {
-      question_id: q.id, selected: answer, is_correct: correct,
-      response_ms: responseMs, combo: streakRef.current.current, score_delta: points
-    }];
+    answersRef.current.push({
+      question_id: q.id, selected: text,
+      is_correct: ok, response_ms: ms,
+      combo: streakRef.current.current, score_delta: pts
+    });
 
-    if (!correct && livesRef.current <= 0) { setTimeout(() => setPhase('gameover'), 1200); return; }
+    if (!ok && livesRef.current <= 0) {
+      setTimeout(() => setPhase('gameover'), 1200);
+      return;
+    }
     setTimeout(() => {
-      setFeedback(null); setSelectedAnswer(null); setShowExplanation(false); advanceQuestion();
-    }, correct ? 700 : 1400);
+      setFeedback(null); setSelected(null); setShowExp(false); advanceQ();
+    }, ok ? 700 : 1400);
   }
 
+  // ─── Finish ───────────────────────────────────────────────────────────────
   async function finishSession() {
     stopTimer();
     setPhase('result');
 
-    // FIX weekly_score — optimistic patch immediately
+    // ✅ FIX weekly_score — خطوة 1: تحديث فوري optimistic
     patchScore(scoreRef.current);
 
-    if (dailyChallenge) localStorage.setItem('lastDailyChallenge', new Date().toDateString());
+    if (isDailyChallenge)
+      localStorage.setItem('lastDaily', new Date().toDateString());
 
     try {
-      await api.put('/game/session', {
+      // خطوة 2: إرسال للسيرفر
+      const response = await api.put('/game/session', {
         session_id: sessionRef.current?.session_id,
         answers: answersRef.current,
         claimed_score: scoreRef.current,
-        duration_ms: Date.now() - sessionStartRef.current
+        duration_ms: Date.now() - startedAt.current
       });
-    } catch (e) { console.error('Submit failed:', e); }
 
-    const sessCount = parseInt(localStorage.getItem('sessCount') || '0') + 1;
-    localStorage.setItem('sessCount', sessCount);
-    if (sessCount % INTERSTITIAL_EVERY === 0) setTimeout(() => ads.showInterstitial(), 2000);
+      // ✅ FIX weekly_score — خطوة 3: مزامنة من القيم الحقيقية في DB
+      if (response?.user) {
+        syncFromServer(response.user);
+      }
+    } catch (e) {
+      console.error('[Game] submit failed:', e);
+    }
+
+    // Interstitial ad كل N جلسات
+    const n = parseInt(localStorage.getItem('sessCount') || '0') + 1;
+    localStorage.setItem('sessCount', n);
+    if (n % INTERSTITIAL_EVERY === 0) setTimeout(() => ads.showInterstitial(), 2000);
   }
 
+  // ─── Revive ───────────────────────────────────────────────────────────────
   async function handleRevive() {
     setAdLoading(true);
-    const result = await ads.showRewarded('revive', session?.session_id);
+    const r = await ads.showRewarded('revive', sessionRef.current?.session_id);
     setAdLoading(false);
-    if (result.success) { livesRef.current = 3; setLives(3); setPhase('playing'); startTimer(); }
-    else alert('الإعلان غير متاح حالياً. حاول لاحقاً.');
+    if (r.success) {
+      livesRef.current = 3; setLives(3);
+      setPhase('playing'); startTimer();
+    } else {
+      alert('الإعلان غير متاح حالياً. حاول لاحقاً.');
+    }
   }
 
-  // FIX referral — uses Telegram WebApp SDK correctly
+  // ─── Share (✅ FIX referral) ──────────────────────────────────────────────
   function handleShare() {
-    const refCode = user?.id ? `ref${user.id}` : 'share';
+    const code = user?.id ? `ref${user.id}` : 'share';
+    const link = `https://t.me/Rabahni_Bot?start=${code}`;
     const text = `🎮 العب ربحني معجم واربح جوائز حقيقية!\n🏆 نقاطي: ${scoreRef.current.toLocaleString()}\nمجاني 100% — مهارة فقط`;
-    const link = `https://t.me/Rabahni_Bot?start=${refCode}`;
     if (tg?.openTelegramLink) {
       tg.openTelegramLink(`https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(text)}`);
     } else if (navigator.share) {
@@ -227,174 +267,236 @@ export default function Game({ config, onExit }) {
     }
   }
 
-  const q = questions[qIndex];
-  const progress = questions.length > 0 ? (qIndex / questions.length) * 100 : 0;
+  // ─── Render ───────────────────────────────────────────────────────────────
+  const q        = questions[qIndex];
+  const progress = questions.length ? (qIndex / questions.length) * 100 : 0;
 
   if (phase === 'loading') return (
-    <div style={{ height:'100%', display:'flex', alignItems:'center', justifyContent:'center',
-      flexDirection:'column', gap:16 }}>
+    <div style={{ height:'100%', display:'flex', flexDirection:'column',
+      alignItems:'center', justifyContent:'center', gap:16 }}>
       <div style={{ fontSize:44, animation:'pulse 1s infinite' }}>📚</div>
-      <div style={{ color:'var(--text-muted)' }}>جاري تحميل الأسئلة...</div>
+      <div style={{ color:'var(--text-muted)', fontSize:15 }}>جاري تحميل الأسئلة...</div>
     </div>
   );
 
   if (phase === 'gameover') return (
-    <GameOver score={score} combo={displayMaxCombo} accuracy={displayAccuracy}
-      answers={answersRef.current} onRevive={handleRevive} onExit={onExit}
-      onShare={handleShare} adLoading={adLoading} />
+    <GameOverScreen score={score} combo={maxCombo} accuracy={displayAcc}
+      onRevive={handleRevive} onExit={onExit} onShare={handleShare}
+      adLoading={adLoading} />
   );
 
   if (phase === 'result') return (
-    <Result score={score} answers={answersRef.current} questions={questions}
-      combo={displayMaxCombo} accuracy={displayAccuracy} level={config.level}
-      onExit={onExit} onShare={handleShare} dailyChallenge={dailyChallenge} />
+    <ResultScreen score={score} answers={answersRef.current} questions={questions}
+      combo={maxCombo} accuracy={displayAcc} level={config.level}
+      onExit={onExit} onShare={handleShare} isDailyChallenge={isDailyChallenge} />
   );
 
   return (
-    <div style={{ height:'100%', display:'flex', flexDirection:'column', padding:16, position:'relative' }}>
+    <div style={{ height:'100%', display:'flex', flexDirection:'column',
+      padding:16, position:'relative', overflow:'hidden' }}>
 
-      {dailyChallenge && (
-        <div style={{ background:'linear-gradient(90deg,#FFB800,#FF6B35)', borderRadius:10,
-          padding:'6px 12px', marginBottom:10, fontSize:12, fontWeight:700, color:'#000',
-          animation:'slideDown 0.4s ease', display:'flex', alignItems:'center', gap:6 }}>
-          ⚡ تحدي يومي نشط — العب الآن واكسب مكافأة مضاعفة!
+      {/* Daily challenge banner */}
+      {isDailyChallenge && (
+        <div style={{
+          background:'linear-gradient(90deg,#FFB800,#FF6B35)',
+          borderRadius:10, padding:'6px 12px', marginBottom:10,
+          fontSize:12, fontWeight:700, color:'#000',
+          display:'flex', alignItems:'center', gap:6,
+          animation:'slideDown 0.4s ease'
+        }}>
+          ⚡ تحدي يومي — أكمل الجلسة واكسب مكافأة مضاعفة!
         </div>
       )}
 
-      {/* Top bar */}
+      {/* Header: ✕ + قلوب + دقة + نقاط + combo */}
       <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:12 }}>
         <button onClick={onExit} style={{ background:'none', border:'none',
-          color:'var(--text-muted)', cursor:'pointer', fontSize:20, padding:4, lineHeight:1 }}>✕</button>
+          color:'var(--text-muted)', cursor:'pointer', fontSize:22,
+          padding:'4px 6px', lineHeight:1 }}>✕</button>
 
+        {/* قلوب */}
         <div style={{ display:'flex', gap:3 }}>
           {[1,2,3].map(i => (
-            <span key={i} style={{ fontSize:18, opacity: lives >= i ? 1 : 0.2,
+            <span key={i} style={{
+              fontSize:18,
+              opacity: lives >= i ? 1 : 0.2,
               transition:'opacity 0.3s, transform 0.3s',
               display:'inline-block',
-              transform: lives < i ? 'scale(0.5)' : 'scale(1)' }}>❤️</span>
+              transform: lives < i ? 'scale(0.5)' : 'scale(1)'
+            }}>❤️</span>
           ))}
         </div>
 
-        {/* FIX accuracy display */}
-        <div style={{ background:'var(--bg3)', borderRadius:8, padding:'2px 8px', fontSize:11, fontWeight:700 }}>
-          🎯 {displayAccuracy}%
+        {/* ✅ FIX accuracy — يتحدث بعد كل إجابة */}
+        <div style={{
+          background:'var(--bg3)', borderRadius:8, padding:'2px 8px',
+          fontSize:11, fontWeight:700, color: displayAcc >= 70 ? 'var(--primary)' : 'var(--warning)'
+        }}>
+          🎯 {displayAcc}%
         </div>
 
         <div style={{ flex:1 }} />
 
+        {/* نقاط */}
         <div style={{ textAlign:'right', position:'relative' }}>
-          <div style={{ fontSize:20, fontWeight:900, color:'var(--primary)',
-            transition:'transform 0.15s', transform: pointsPopup ? 'scale(1.1)' : 'scale(1)' }}>
+          <div style={{
+            fontSize:20, fontWeight:900, color:'var(--primary)',
+            transition:'transform 0.15s',
+            transform: popup ? 'scale(1.15)' : 'scale(1)'
+          }}>
             {score.toLocaleString()}
           </div>
           <div style={{ fontSize:10, color:'var(--text-muted)' }}>نقطة</div>
-          {pointsPopup && (
-            <div style={{ position:'absolute', top:-20, right:0, color:'var(--primary)',
-              fontWeight:900, fontSize:14, animation:'floatUp 0.9s ease forwards', pointerEvents:'none',
-              whiteSpace:'nowrap' }}>
-              +{pointsPopup.value}
-            </div>
+          {popup != null && (
+            <div style={{
+              position:'absolute', top:-22, right:0,
+              color:'var(--primary)', fontWeight:900, fontSize:14,
+              animation:'floatUp 0.9s ease forwards',
+              pointerEvents:'none', whiteSpace:'nowrap'
+            }}>+{popup}</div>
           )}
         </div>
 
+        {/* Combo badge */}
         {displayCombo > 1 && (
           <div style={{
-            background: displayCombo >= 5 ? 'linear-gradient(135deg,#FF6B35,#FFB800)' : 'var(--bg3)',
+            background: displayCombo >= 5
+              ? 'linear-gradient(135deg,#FF6B35,#FFB800)'
+              : 'var(--bg3)',
             borderRadius:10, padding:'3px 10px',
             animation: comboFlash ? 'comboFlash 0.5s ease' : 'none',
-            boxShadow: displayCombo >= 5 ? '0 0 12px rgba(255,107,53,0.5)' : 'none' }}>
-            <div style={{ fontSize:12, fontWeight:900,
-              color: displayCombo >= 5 ? '#fff' : 'var(--gold)' }}>
+            boxShadow: displayCombo >= 5 ? '0 0 14px rgba(255,107,53,0.5)' : 'none'
+          }}>
+            <span style={{
+              fontSize:12, fontWeight:900,
+              color: displayCombo >= 5 ? '#fff' : 'var(--gold)'
+            }}>
               {displayCombo >= 5 ? '🌟' : '🔥'} ×{displayCombo}
-            </div>
+            </span>
           </div>
         )}
       </div>
 
-      {/* Progress */}
-      <div style={{ height:4, background:'var(--bg3)', borderRadius:99, marginBottom:12, overflow:'hidden' }}>
-        <div style={{ height:'100%', borderRadius:99,
+      {/* شريط التقدم */}
+      <div style={{
+        height:4, background:'var(--bg3)', borderRadius:99,
+        marginBottom:10, overflow:'hidden'
+      }}>
+        <div style={{
+          height:'100%', borderRadius:99,
           background:'linear-gradient(90deg,var(--primary-dk),var(--primary))',
-          width:`${progress}%`, transition:'width 0.4s ease' }} />
+          width:`${progress}%`, transition:'width 0.4s ease'
+        }} />
       </div>
 
-      {/* Timer */}
+      {/* شريط الوقت */}
       <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:12 }}>
-        <div style={{ flex:1, height:6, background:'var(--bg3)', borderRadius:99, overflow:'hidden' }}>
+        <div style={{
+          flex:1, height:6, background:'var(--bg3)',
+          borderRadius:99, overflow:'hidden'
+        }}>
           <div style={{
             height:'100%', borderRadius:99,
-            background: timeLeft > 8 ? 'var(--primary)' : timeLeft > 4 ? 'var(--warning)' : 'var(--danger)',
-            width:`${(timeLeft/QUESTION_TIME)*100}%`,
+            background: timeLeft > 8 ? 'var(--primary)'
+              : timeLeft > 4 ? 'var(--warning)' : 'var(--danger)',
+            width:`${(timeLeft / QUESTION_TIME) * 100}%`,
             transition:'width 1s linear, background 0.4s',
-            animation: timePressureFlash ? 'timerPulse 0.5s ease infinite' : 'none'
+            animation: tpFlash ? 'timerPulse 0.4s ease infinite' : 'none'
           }} />
         </div>
-        <div style={{ fontSize:15, fontWeight:900, minWidth:24, textAlign:'center',
-          color: timeLeft <= 4 ? 'var(--danger)' : timeLeft <= 8 ? 'var(--warning)' : 'var(--text)',
-          transition:'color 0.3s' }}>
+        <div style={{
+          fontSize:16, fontWeight:900, minWidth:24, textAlign:'center',
+          color: timeLeft <= 4 ? 'var(--danger)'
+            : timeLeft <= 8 ? 'var(--warning)' : 'var(--text)',
+          transition:'color 0.3s'
+        }}>
           {timeLeft}
         </div>
       </div>
 
-      {/* Question + answers */}
+      {/* سؤال + إجابات */}
       {q && (
-        <div style={{ flex:1, display:'flex', flexDirection:'column', gap:9 }}>
+        <div style={{ flex:1, display:'flex', flexDirection:'column', gap:9, overflow:'hidden' }}>
+
+          {/* نوع السؤال + رقم */}
           <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
-            <QuestionTypeTag type={q.type} />
-            <span style={{ fontSize:11, color:'var(--text-muted)' }}>{qIndex+1}/{questions.length}</span>
+            <QuestionTag type={q.type} />
+            <span style={{ fontSize:11, color:'var(--text-muted)' }}>
+              {qIndex + 1} / {questions.length}
+            </span>
           </div>
 
-          <div className="card" style={{ padding:'16px', textAlign:'center',
-            animation:'fadeInDown 0.3s ease', borderColor:'var(--bg4)' }}>
-            <div style={{ fontSize: q.text.length > 60 ? 15 : 18, fontWeight:700,
-              color:'var(--text)', lineHeight:1.7 }}>
+          {/* نص السؤال */}
+          <div className="card" style={{
+            padding:'16px', textAlign:'center',
+            animation:'fadeInDown 0.25s ease',
+            borderColor:'var(--bg4)'
+          }}>
+            <div style={{
+              fontSize: q.text.length > 60 ? 15 : 18,
+              fontWeight:700, lineHeight:1.7
+            }}>
               {q.text}
             </div>
           </div>
 
+          {/* أزرار الإجابات */}
           <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
-            {q.answers.map((ans, idx) => {
-              const isSelected = selectedAnswer === ans.text;
-              const isCorrect = ans.isCorrect;
-              let bg = 'var(--bg3)', border = 'var(--border)', color = 'var(--text)';
+            {q.answers.map((ans, i) => {
+              const isSel = selected === ans.text;
+              const isOk  = ans.isCorrect;
+              let bg = 'var(--bg3)', bd = 'var(--border)', cl = 'var(--text)';
+
               if (feedback !== null) {
-                if (isCorrect) { bg='rgba(37,211,102,0.15)'; border='var(--primary)'; color='var(--primary)'; }
-                else if (isSelected) { bg='rgba(255,92,92,0.12)'; border='var(--danger)'; color='var(--danger)'; }
+                if (isOk)         { bg='rgba(37,211,102,0.15)'; bd='var(--primary)'; cl='var(--primary)'; }
+                else if (isSel)   { bg='rgba(255,92,92,0.12)';  bd='var(--danger)';  cl='var(--danger)'; }
               }
-              if (feedback === 'wrong' && !selectedAnswer && isCorrect) {
-                bg='rgba(37,211,102,0.15)'; border='var(--primary)'; color='var(--primary)';
+              // إظهار الإجابة الصحيحة عند انتهاء الوقت
+              if (feedback === 'wrong' && !selected && isOk) {
+                bg='rgba(37,211,102,0.15)'; bd='var(--primary)'; cl='var(--primary)';
               }
-              const movingAnim = feedback === null
-                ? (idx % 2 === 0 ? 'moveLeft 4s ease-in-out infinite' : 'moveRight 4s ease-in-out infinite')
+
+              const anim = feedback === null
+                ? (i % 2 === 0 ? 'moveLeft 4s ease-in-out infinite'
+                               : 'moveRight 4s ease-in-out infinite')
                 : 'none';
+
               return (
-                <button key={idx} onClick={() => handleAnswer(ans.text)}
+                <button key={i}
+                  onClick={() => handleAnswer(ans.text)}
                   disabled={feedback !== null}
-                  style={{ padding:'13px 16px', borderRadius:12,
-                    border:`2px solid ${border}`, background:bg, color,
+                  style={{
+                    padding:'13px 16px', borderRadius:12,
+                    border:`2px solid ${bd}`, background:bg, color:cl,
                     fontFamily:'Cairo,sans-serif', fontSize:14, fontWeight:600,
-                    textAlign:'right', cursor:feedback!==null?'default':'pointer',
-                    transition:'all 0.2s', outline:'none', animation: movingAnim,
-                    transform: isSelected ? 'scale(0.97)' : 'scale(1)',
-                    boxShadow: feedback !== null && isCorrect ? '0 0 12px rgba(37,211,102,0.3)' : 'none',
-                    display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+                    textAlign:'right', cursor: feedback !== null ? 'default' : 'pointer',
+                    transition:'all 0.2s', outline:'none',
+                    animation: anim,
+                    display:'flex', justifyContent:'space-between', alignItems:'center',
+                    boxShadow: feedback !== null && isOk ? '0 0 14px rgba(37,211,102,0.3)' : 'none',
+                  }}>
                   <span>{ans.text}</span>
-                  {feedback !== null && isCorrect && <span>✅</span>}
-                  {feedback !== null && isSelected && !isCorrect && <span>❌</span>}
+                  {feedback !== null && isOk      && <span>✅</span>}
+                  {feedback !== null && isSel && !isOk && <span>❌</span>}
                 </button>
               );
             })}
           </div>
 
+          {/* زر الشرح */}
           {feedback === 'wrong' && q.explanation && (
             <button className="btn btn-secondary btn-sm"
-              onClick={() => setShowExplanation(v => !v)} style={{ alignSelf:'center', marginTop:4 }}>
-              💡 {showExplanation ? 'إخفاء الشرح' : 'شرح الإجابة'}
+              onClick={() => setShowExp(v => !v)}
+              style={{ alignSelf:'center', marginTop:4 }}>
+              💡 {showExp ? 'إخفاء الشرح' : 'شرح الإجابة'}
             </button>
           )}
-          {showExplanation && q.explanation && (
-            <div className="card" style={{ fontSize:13, color:'var(--text-muted)',
-              animation:'fadeInUp 0.2s ease', borderColor:'rgba(37,211,102,0.2)' }}>
+          {showExp && q.explanation && (
+            <div className="card" style={{
+              fontSize:13, color:'var(--text-muted)', lineHeight:1.7,
+              animation:'fadeInUp 0.2s ease',
+              borderColor:'rgba(37,211,102,0.2)'
+            }}>
               {q.explanation}
             </div>
           )}
@@ -404,126 +506,164 @@ export default function Game({ config, onExit }) {
   );
 }
 
-function QuestionTypeTag({ type }) {
-  const map = {
-    word_to_meaning: { label:'كلمة → معنى', color:'#4CAF50' },
-    meaning_to_word: { label:'معنى → كلمة', color:'#2196F3' },
-    context:         { label:'سياق',         color:'#FF9800' },
-    synonym:         { label:'مرادف',        color:'#9C27B0' },
-    antonym:         { label:'مضاد',         color:'#F44336' },
-    translation:     { label:'ترجمة',        color:'#00BCD4' },
+// ─── Sub-components ────────────────────────────────────────────────────────
+
+function QuestionTag({ type }) {
+  const m = {
+    word_to_meaning: ['كلمة → معنى', '#4CAF50'],
+    meaning_to_word: ['معنى → كلمة', '#2196F3'],
+    context:         ['سياق',         '#FF9800'],
   };
-  const tag = map[type] || { label: type, color:'var(--text-muted)' };
+  const [label, color] = m[type] || [type, 'var(--text-muted)'];
   return (
-    <div style={{ fontSize:10, fontWeight:700, color: tag.color,
-      background:`${tag.color}18`, padding:'3px 8px', borderRadius:99 }}>
-      {tag.label}
-    </div>
+    <span style={{
+      fontSize:10, fontWeight:700, color,
+      background:`${color}18`, padding:'3px 8px', borderRadius:99
+    }}>{label}</span>
   );
 }
 
-function GameOver({ score, combo, accuracy, answers, onRevive, onExit, onShare, adLoading }) {
+function GameOverScreen({ score, combo, accuracy, onRevive, onExit, onShare, adLoading }) {
   return (
-    <div style={{ height:'100%', display:'flex', flexDirection:'column', alignItems:'center',
-      justifyContent:'center', gap:18, padding:24, textAlign:'center' }}>
+    <div style={{ height:'100%', display:'flex', flexDirection:'column',
+      alignItems:'center', justifyContent:'center', gap:18, padding:24, textAlign:'center' }}>
+
       <div style={{ fontSize:64, animation:'shake 0.5s ease' }}>💔</div>
       <div style={{ fontSize:22, fontWeight:900 }}>انتهت حياتك!</div>
+
       <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:10, width:'100%' }}>
         {[
-          { label:'النقاط',     value: score.toLocaleString(), emoji:'⭐' },
-          { label:'الدقة',      value: `${accuracy}%`,         emoji:'🎯' },
-          { label:'أعلى كومبو', value: `×${combo}`,            emoji:'🔥' },
+          { e:'⭐', v: score.toLocaleString(), l:'النقاط' },
+          { e:'🎯', v: `${accuracy}%`,         l:'الدقة' },
+          { e:'🔥', v: `×${combo}`,             l:'أعلى كومبو' },
         ].map(s => (
-          <div key={s.label} className="card" style={{ textAlign:'center', padding:'10px 6px' }}>
-            <div style={{ fontSize:20 }}>{s.emoji}</div>
-            <div style={{ fontSize:15, fontWeight:900 }}>{s.value}</div>
-            <div style={{ fontSize:10, color:'var(--text-muted)' }}>{s.label}</div>
+          <div key={s.l} className="card" style={{ textAlign:'center', padding:'10px 4px' }}>
+            <div style={{ fontSize:22 }}>{s.e}</div>
+            <div style={{ fontSize:15, fontWeight:900 }}>{s.v}</div>
+            <div style={{ fontSize:10, color:'var(--text-muted)' }}>{s.l}</div>
           </div>
         ))}
       </div>
+
       <div className="card" style={{ width:'100%', padding:20 }}>
         <div style={{ fontSize:13, color:'var(--text-muted)', marginBottom:14 }}>
-          🎁 شاهد إعلاناً قصيراً للحصول على فرصة ثانية وإعادة القلوب الثلاثة
+          🎁 شاهد إعلاناً قصيراً للحصول على فرصة ثانية مع 3 قلوب كاملة
         </div>
-        <button className="btn btn-primary" onClick={onRevive} disabled={adLoading} style={{ marginBottom:10 }}>
-          {adLoading ? '⏳ جاري تحميل الإعلان...' : '📺 شاهد إعلاناً — فرصة ثانية'}
+        <button className="btn btn-primary" onClick={onRevive}
+          disabled={adLoading} style={{ marginBottom:10 }}>
+          {adLoading ? '⏳ جاري التحميل...' : '📺 شاهد إعلاناً — فرصة ثانية'}
         </button>
         <button className="btn btn-secondary" onClick={onExit}>❌ الخروج</button>
       </div>
-      <button className="btn btn-secondary btn-sm" onClick={onShare} style={{ width:'auto', padding:'10px 24px' }}>
-        📤 شارك نتيجتك وتحدَّ أصدقاءك
+
+      <button className="btn btn-secondary btn-sm" onClick={onShare}
+        style={{ width:'auto', padding:'10px 24px' }}>
+        📤 شارك نتيجتك
       </button>
     </div>
   );
 }
 
-function Result({ score, answers, questions, combo, accuracy, level, onExit, onShare, dailyChallenge }) {
-  const correct = answers.filter(a => a.is_correct).length;
+function ResultScreen({ score, answers, questions, combo, accuracy, level, onExit, onShare, isDailyChallenge }) {
+  const correct   = answers.filter(a => a.is_correct).length;
   const isPerfect = correct === answers.length && answers.length > 0;
-  const trophy = accuracy >= 90 ? '🏆' : accuracy >= 70 ? '⭐' : '📚';
+  const trophy    = accuracy >= 90 ? '🏆' : accuracy >= 70 ? '⭐' : '📚';
+
   return (
     <div className="scroll-y" style={{ height:'100%', padding:20 }}>
+
+      {/* Header */}
       <div style={{ textAlign:'center', marginBottom:20, animation:'bounceIn 0.5s ease' }}>
         <div style={{ fontSize:64, marginBottom:8 }}>{trophy}</div>
         <div style={{ fontSize:26, fontWeight:900, color:'var(--primary)', marginBottom:4 }}>
-          {score.toLocaleString()} <span style={{ fontSize:14, color:'var(--text-muted)' }}>نقطة</span>
+          {score.toLocaleString()}
+          <span style={{ fontSize:14, color:'var(--text-muted)', fontWeight:400, marginRight:6 }}>نقطة</span>
         </div>
         {isPerfect && (
-          <div style={{ background:'linear-gradient(135deg,#FFD700,#FF6B35)', borderRadius:12,
-            padding:'6px 16px', display:'inline-block', fontSize:13, fontWeight:900, color:'#000' }}>
-            🌟 إجابات مثالية!
+          <div style={{
+            background:'linear-gradient(135deg,#FFD700,#FF6B35)',
+            borderRadius:12, padding:'6px 16px',
+            display:'inline-block', fontSize:13, fontWeight:900, color:'#000'
+          }}>
+            🌟 إجابات مثالية بدون أخطاء!
           </div>
         )}
-        {dailyChallenge && (
-          <div style={{ background:'rgba(37,211,102,0.15)', border:'1px solid var(--primary)',
-            borderRadius:10, padding:'6px 14px', marginTop:8, fontSize:12, color:'var(--primary)' }}>
+        {isDailyChallenge && (
+          <div style={{
+            marginTop:8, fontSize:12, color:'var(--primary)',
+            background:'rgba(37,211,102,0.1)',
+            border:'1px solid rgba(37,211,102,0.25)',
+            borderRadius:10, padding:'5px 14px', display:'inline-block'
+          }}>
             ✅ أكملت التحدي اليومي!
           </div>
         )}
       </div>
+
+      {/* Stats */}
       <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10, marginBottom:16 }}>
         {[
-          { label:'الدقة',      value:`${accuracy}%`,                emoji:'🎯' },
-          { label:'أعلى كومبو', value:`×${combo}`,                   emoji:'🔥' },
-          { label:'الإجابات',   value:`${correct}/${answers.length}`, emoji:'✅' },
-          { label:'المستوى',    value:`${level}`,                     emoji:'🏅' },
+          { e:'🎯', v:`${accuracy}%`,                   l:'الدقة' },
+          { e:'🔥', v:`×${combo}`,                      l:'أعلى كومبو' },
+          { e:'✅', v:`${correct}/${answers.length}`,   l:'الإجابات' },
+          { e:'🏅', v:`${level}`,                       l:'المستوى' },
         ].map(s => (
-          <div key={s.label} className="card" style={{ textAlign:'center', padding:'14px 10px' }}>
-            <div style={{ fontSize:24 }}>{s.emoji}</div>
-            <div style={{ fontSize:18, fontWeight:900 }}>{s.value}</div>
-            <div style={{ fontSize:11, color:'var(--text-muted)' }}>{s.label}</div>
+          <div key={s.l} className="card" style={{ textAlign:'center', padding:'14px 10px' }}>
+            <div style={{ fontSize:24 }}>{s.e}</div>
+            <div style={{ fontSize:18, fontWeight:900 }}>{s.v}</div>
+            <div style={{ fontSize:11, color:'var(--text-muted)' }}>{s.l}</div>
           </div>
         ))}
       </div>
+
+      {/* تفاصيل الجلسة */}
       {answers.length > 0 && (
         <div className="card" style={{ marginBottom:16 }}>
           <div style={{ fontSize:14, fontWeight:700, marginBottom:10 }}>📊 تفاصيل الجلسة</div>
           {answers.slice(0, 5).map((a, i) => {
             const q = questions[i];
             return (
-              <div key={i} style={{ display:'flex', alignItems:'center', gap:8,
-                padding:'6px 0', borderBottom: i < 4 ? '1px solid var(--border)' : 'none', fontSize:12 }}>
+              <div key={i} style={{
+                display:'flex', alignItems:'center', gap:8, fontSize:12,
+                padding:'6px 0',
+                borderBottom: i < Math.min(4, answers.length - 1) ? '1px solid var(--border)' : 'none'
+              }}>
                 <span>{a.is_correct ? '✅' : '❌'}</span>
-                <span style={{ flex:1, color:'var(--text-muted)', overflow:'hidden',
-                  textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{q?.text || '...'}</span>
+                <span style={{
+                  flex:1, color:'var(--text-muted)',
+                  overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'
+                }}>{q?.text || '...'}</span>
                 <span style={{ color:'var(--primary)', fontWeight:700, flexShrink:0 }}>
                   {a.is_correct ? `+${a.score_delta}` : '—'}
                 </span>
               </div>
             );
           })}
+          {answers.length > 5 && (
+            <div style={{ fontSize:11, color:'var(--text-muted)', textAlign:'center', paddingTop:8 }}>
+              +{answers.length - 5} سؤال آخر
+            </div>
+          )}
         </div>
       )}
+
       <button className="btn btn-primary" onClick={onShare} style={{ marginBottom:10 }}>
         📤 شارك نتيجتك وتحدَّ أصدقاءك
       </button>
-      <button className="btn btn-secondary" onClick={onExit}>🏠 العودة للرئيسية</button>
+      <button className="btn btn-secondary" onClick={onExit}>
+        🏠 العودة للرئيسية
+      </button>
     </div>
   );
 }
 
-function getDeviceFingerprint() {
-  const parts = [navigator.userAgent.length, screen.width, screen.height,
-    navigator.language, new Date().getTimezoneOffset()];
-  return btoa(parts.join('-')).slice(0, 20);
+function getDeviceFp() {
+  try {
+    return btoa([
+      navigator.userAgent.length,
+      screen.width, screen.height,
+      navigator.language,
+      new Date().getTimezoneOffset()
+    ].join('|')).slice(0, 20);
+  } catch { return 'unknown'; }
 }

@@ -1,8 +1,7 @@
-// api/game/session.js — Start and manage game sessions
+// api/game/session.js — Fixed: returns updated user object after submit
 import { authenticate, setCors } from '../../lib/auth.js';
 import { supabase, auditLog } from '../../lib/supabase.js';
-import { checkRateLimit } from '../../lib/anti-cheat.js';
-import { validateScore, validateSession, computeServerScore } from '../../lib/anti-cheat.js';
+import { checkRateLimit, validateScore, validateSession } from '../../lib/anti-cheat.js';
 
 export default async function handler(req, res) {
   setCors(res);
@@ -10,33 +9,26 @@ export default async function handler(req, res) {
 
   const auth = await authenticate(req, res);
   if (!auth) return;
-
   const { user, ipHash } = auth;
 
-  // ── POST /api/game/session — Start new session ──
+  // ── POST — بدء جلسة جديدة ────────────────────────────────────────────────
   if (req.method === 'POST') {
     const { level, language, deviceFp } = req.body;
 
-    // Validate inputs
-    if (!level || level < 1 || level > 10) {
+    if (!level || level < 1 || level > 10)
       return res.status(400).json({ error: 'Invalid level (1-10)' });
-    }
-    if (!['ar', 'en', 'tr'].includes(language)) {
+    if (!['ar', 'en', 'tr'].includes(language))
       return res.status(400).json({ error: 'Invalid language' });
-    }
-
-    // Rate limit: max 30 sessions per hour
-    if (!checkRateLimit(`session:${user.id}`, 30)) {
+    if (!checkRateLimit(`session:${user.id}`, 30))
       return res.status(429).json({ error: 'Too many sessions, slow down' });
-    }
 
-    // Abandon any previously active session
+    // إلغاء أي جلسة نشطة سابقة
     await supabase.from('game_sessions')
       .update({ status: 'abandoned' })
       .eq('user_id', user.id)
       .eq('status', 'active');
 
-    // Fetch questions for this session (server-side selection — deterministic)
+    // جلب الأسئلة (ترتيب حتمي — لا عشوائية)
     const { data: questions, error: qError } = await supabase
       .from('questions')
       .select('id, question_text, correct_answer, wrong_answers, type, explanation')
@@ -44,60 +36,45 @@ export default async function handler(req, res) {
       .eq('language', language)
       .eq('is_active', true)
       .eq('validated', true)
-      .order('id')   // deterministic order — no randomness
+      .order('id')
       .limit(20);
 
-    if (qError || !questions?.length) {
-      return res.status(500).json({ error: 'No questions available for this level' });
-    }
+    if (qError || !questions?.length)
+      return res.status(500).json({ error: 'Failed to load questions' });
 
-    // Shuffle client-side only for UX — server holds the truth
-    // We send question IDs and the correct answer index is validated server-side
-
-    // Create session
-    const { data: session, error: sError } = await supabase
+    const { data: newSession, error: sesError } = await supabase
       .from('game_sessions')
       .insert({
-        user_id: user.id,
-        level,
-        language,
-        status: 'active',
-        device_fp: deviceFp || null,
-        ip_hash: ipHash
+        user_id: user.id, level, language,
+        device_fp: deviceFp, ip_hash: ipHash, status: 'active',
+        session_data: { question_ids: questions.map(q => q.id) }
       })
-      .select()
+      .select('id')
       .single();
 
-    if (sError) {
+    if (sesError)
       return res.status(500).json({ error: 'Failed to create session' });
-    }
 
-    await auditLog(user.id, 'session_started', 'game_session', session.id, { level, language });
+    const gameQuestions = questions.map(q => ({
+      id: q.id,
+      text: q.question_text,
+      type: q.type || 'word_to_meaning',
+      explanation: q.explanation,
+      answers: shuffleAnswers(q.correct_answer, q.wrong_answers)
+    }));
 
-    // Return session + questions (answers sent too — validation is server-side)
-    return res.status(200).json({
-      session_id: session.id,
-      questions: questions.map(q => ({
-        id: q.id,
-        text: q.question_text,
-        type: q.type,
-        explanation: q.explanation,
-        // Send all answers (correct + wrong) — client shuffles for display
-        answers: shuffleAnswers(q.correct_answer, q.wrong_answers),
-      })),
-      started_at: session.started_at
-    });
+    await auditLog(user.id, 'session_started', 'game_session', newSession.id, { level, language });
+
+    return res.status(200).json({ session_id: newSession.id, questions: gameQuestions });
   }
 
-  // ── PUT /api/game/session — Submit completed session ──
+  // ── PUT — تسليم الجلسة ────────────────────────────────────────────────────
   if (req.method === 'PUT') {
     const { session_id, answers: clientAnswers, claimed_score, duration_ms } = req.body;
 
-    if (!session_id || !clientAnswers || !duration_ms) {
-      return res.status(400).json({ error: 'Missing required fields' });
-    }
+    if (!session_id || !Array.isArray(clientAnswers))
+      return res.status(400).json({ error: 'Invalid request' });
 
-    // Fetch session
     const { data: session } = await supabase
       .from('game_sessions')
       .select('*')
@@ -105,11 +82,11 @@ export default async function handler(req, res) {
       .eq('user_id', user.id)
       .single();
 
-    if (!session) return res.status(404).json({ error: 'Session not found' });
-    if (session.submitted) return res.status(409).json({ error: 'Already submitted' });
+    if (!session)           return res.status(404).json({ error: 'Session not found' });
+    if (session.submitted)  return res.status(409).json({ error: 'Already submitted' });
     if (session.status !== 'active') return res.status(409).json({ error: 'Session not active' });
 
-    // Validate each answer against DB
+    // تحقق من كل إجابة مقارنةً بالـ DB
     const validatedAnswers = [];
     for (const ans of clientAnswers) {
       const { data: question } = await supabase
@@ -117,88 +94,91 @@ export default async function handler(req, res) {
         .select('correct_answer')
         .eq('id', ans.question_id)
         .single();
-
       if (!question) continue;
-
-      const isCorrect = ans.selected === question.correct_answer;
       validatedAnswers.push({
         question_id: ans.question_id,
         selected_answer: ans.selected,
-        is_correct: isCorrect,
+        is_correct: ans.selected === question.correct_answer,
         response_ms: ans.response_ms,
         combo_at_time: ans.combo || 0
       });
     }
 
-    // Anti-cheat: validate session integrity
     const sessionCheck = validateSession({ duration_ms }, validatedAnswers);
-    const scoreCheck = validateScore(claimed_score, validatedAnswers, session.level);
-
-    const cheatFlags = [
+    const scoreCheck   = validateScore(claimed_score, validatedAnswers, session.level);
+    const cheatFlags   = [
       ...sessionCheck.flags,
       ...(!scoreCheck.valid ? [scoreCheck.flag] : [])
     ];
-
-    // Use server score (authoritative)
-    const finalScore = scoreCheck.serverScore;
-    const accuracy = validatedAnswers.length > 0
+    const finalScore = cheatFlags.length > 0 ? 0 : scoreCheck.serverScore;
+    const accuracy   = validatedAnswers.length > 0
       ? Math.round(validatedAnswers.filter(a => a.is_correct).length / validatedAnswers.length * 100)
       : 0;
 
-    // Submit via transaction-safe function
+    // حفظ حتمي في DB
     const { data: result } = await supabase.rpc('submit_session_score', {
       p_session_id: session_id,
       p_user_id: user.id,
-      p_score: cheatFlags.length > 0 ? 0 : finalScore,
+      p_score: finalScore,
       p_accuracy: accuracy,
       p_duration_ms: duration_ms,
       p_cheat_flags: cheatFlags
     });
 
-    if (result?.error) {
-      return res.status(400).json({ error: result.error });
-    }
+    if (result?.error) return res.status(400).json({ error: result.error });
 
-    // Store individual answers for audit
+    // حفظ الإجابات للتدقيق
     if (validatedAnswers.length > 0) {
       let combo = 0;
-      const answerRows = validatedAnswers.map(a => {
-        if (a.is_correct) combo++; else combo = 0;
-        return {
-          session_id,
-          user_id: user.id,
-          question_id: a.question_id,
-          selected_answer: a.selected_answer,
-          is_correct: a.is_correct,
-          response_ms: a.response_ms,
-          combo_at_time: combo
-        };
-      });
-
-      await supabase.from('answers').insert(answerRows);
+      await supabase.from('answers').insert(
+        validatedAnswers.map(a => {
+          if (a.is_correct) combo++; else combo = 0;
+          return {
+            session_id, user_id: user.id,
+            question_id: a.question_id,
+            selected_answer: a.selected_answer,
+            is_correct: a.is_correct,
+            response_ms: a.response_ms,
+            combo_at_time: combo
+          };
+        })
+      );
     }
 
     await auditLog(user.id, 'session_completed', 'game_session', session_id, {
-      score: finalScore,
-      cheat_flags: cheatFlags,
-      accuracy
+      score: finalScore, cheat_flags: cheatFlags, accuracy
     });
+
+    // ✅ CRITICAL FIX — جلب المستخدم المحدَّث وإرجاعه
+    // بدون هذا، Frontend لا يعرف weekly_score الجديد
+    const { data: updatedUser } = await supabase
+      .from('users')
+      .select('weekly_score, total_score, games_played, coins')
+      .eq('telegram_id', user.id)
+      .single();
 
     return res.status(200).json({
       success: true,
       score: finalScore,
       accuracy,
       cheat_detected: cheatFlags.length > 0,
-      message: cheatFlags.length > 0 ? 'Score not counted — suspicious activity detected' : 'Score recorded!'
+      message: cheatFlags.length > 0
+        ? 'Score not counted — suspicious activity'
+        : 'Score recorded!',
+      // ✅ هذا هو المفتاح — بدونه لا يتحدث weekly_score
+      user: updatedUser || {
+        weekly_score: 0, total_score: 0, games_played: 0, coins: 0
+      }
     });
   }
 
   res.status(405).json({ error: 'Method not allowed' });
 }
 
-// Helper: create answer array without revealing which is correct
 function shuffleAnswers(correct, wrongs) {
-  const all = [{ text: correct, isCorrect: true }, ...wrongs.map(w => ({ text: w, isCorrect: false }))];
-  // Deterministic shuffle using question content (not random)
+  const all = [
+    { text: correct, isCorrect: true },
+    ...wrongs.map(w => ({ text: w, isCorrect: false }))
+  ];
   return all.sort((a, b) => a.text.localeCompare(b.text));
 }
