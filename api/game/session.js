@@ -29,18 +29,23 @@ export default async function handler(req, res) {
       .eq('status', 'active');
 
     // جلب الأسئلة (ترتيب حتمي — لا عشوائية)
+    // نقبل is_active=true بغض النظر عن validated
+    // لأن validated=FALSE بشكل افتراضي وقد لا تكون الأسئلة مراجعة بعد
     const { data: questions, error: qError } = await supabase
       .from('questions')
       .select('id, question_text, correct_answer, wrong_answers, type, explanation')
       .eq('level', level)
       .eq('language', language)
       .eq('is_active', true)
-      .eq('validated', true)
       .order('id')
       .limit(20);
 
     if (qError || !questions?.length)
-      return res.status(500).json({ error: 'Failed to load questions' });
+      return res.status(500).json({ 
+        error: qError 
+          ? `DB error: ${qError.message}` 
+          : `No questions found for level=${level} language=${language}. Please add questions in Supabase first.`
+      });
 
     const { data: newSession, error: sesError } = await supabase
       .from('game_sessions')
@@ -150,11 +155,11 @@ export default async function handler(req, res) {
     });
 
     // ✅ CRITICAL FIX — جلب المستخدم المحدَّث وإرجاعه
-    // بدون هذا، Frontend لا يعرف weekly_score الجديد
+    // users.id = telegram_id (Primary Key)
     const { data: updatedUser } = await supabase
       .from('users')
       .select('weekly_score, total_score, games_played, coins')
-      .eq('telegram_id', user.id)
+      .eq('id', user.id)
       .single();
 
     return res.status(200).json({

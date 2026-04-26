@@ -85,7 +85,9 @@ export default function Game({ config, onExit }) {
       setPhase('playing');
       startTimer();
     } catch (e) {
-      alert('فشل تحميل الأسئلة. حاول مجدداً.');
+      console.error('[Game] startSession error:', e);
+      const msg = e?.message || 'خطأ غير معروف';
+      alert(`فشل تحميل الأسئلة\n\nالسبب: ${msg}\n\nحاول مجدداً.`);
       onExit();
     }
   }
