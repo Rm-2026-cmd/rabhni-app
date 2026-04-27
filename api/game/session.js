@@ -121,16 +121,37 @@ export default async function handler(req, res) {
       : 0;
 
     // حفظ حتمي في DB
-    const { data: result } = await supabase.rpc('submit_session_score', {
-      p_session_id: session_id,
-      p_user_id: user.id,
-      p_score: finalScore,
-      p_accuracy: accuracy,
-      p_duration_ms: duration_ms,
-      p_cheat_flags: cheatFlags
-    });
+    // تحديث الجلسة مباشرة
+await supabase
+  .from('game_sessions')
+  .update({
+    score:        finalScore,
+    accuracy:     accuracy,
+    duration_ms:  duration_ms,
+    status:       'completed',
+    completed_at: new Date().toISOString(),
+    submitted:    true
+  })
+  .eq('id', session_id)
+  .eq('submitted', false);
 
-    if (result?.error) return res.status(400).json({ error: result.error });
+// تحديث نقاط المستخدم مباشرة بدون RPC
+const { data: currentUser } = await supabase
+  .from('users')
+  .select('weekly_score, total_score, games_played')
+  .eq('id', user.id)
+  .single();
+
+if (currentUser) {
+  await supabase
+    .from('users')
+    .update({
+      weekly_score: (currentUser.weekly_score || 0) + finalScore,
+      total_score:  (currentUser.total_score  || 0) + finalScore,
+      games_played: (currentUser.games_played || 0) + 1,
+    })
+    .eq('id', user.id);
+}
 
     // حفظ الإجابات للتدقيق
     if (validatedAnswers.length > 0) {
